@@ -1,0 +1,22 @@
+# Python
+*.pyc
+__pycache__/
+*.env
+VenvLx/
+
+# Model files
+Models/*/
+
+# Dataset files
+Datasets/*/
+
+# Logs
+*.log
+DLog*.zip
+DLog.*zip
+DLog.*.log.zip
+
+# Docker
+*.dockerignore
+
+*:Zone.Identifier
