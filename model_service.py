@@ -7,6 +7,7 @@ import torch
 import os
 import pkgutil
 from pydantic import BaseModel
+import numpy as np
 
 ## =====================================-------------------=====================================
 ## ------------------------------------- CLASS DEFINITIONS -------------------------------------
@@ -14,13 +15,46 @@ from pydantic import BaseModel
 
 class ModelParams:
     def __init__(self, request):
-        self.model = request.model                            # Name of the model being used
-        self.input_type = request.input_type                  # Type of input (document, query, passage)
-        self.pooling_strategy = request.pooling_strategy      # Pooling strategy for embeddings
-        self.max_length = request.max_length                  # Maximum sequence length
-        self.task = request.task                             # Optional task for models that support it
-        self.truncate_dim = request.truncate_dim             # Optional dimension truncation
-        self.encoding_format = request.encoding_format        # Output format (float)
+        # Make these instance variables to ensure __dict__ exists
+        self.__dict__.update({
+            'model': request.model,
+            'input_type': request.input_type if hasattr(request, 'input_type') else "document",
+            'pooling_strategy': request.pooling_strategy if hasattr(request, 'pooling_strategy') else "mean",
+            'max_length': request.max_length if hasattr(request, 'max_length') else None,
+            'task': request.task if hasattr(request, 'task') else None,
+            'truncate_dim': request.truncate_dim if hasattr(request, 'truncate_dim') else None,
+            'encoding_format': request.encoding_format if hasattr(request, 'encoding_format') else "float",
+            'truncate': request.truncate if hasattr(request, 'truncate') else None
+        })
+
+    def __eq__(self, other):
+        """Enable direct comparison of parameter objects"""
+        if not isinstance(other, ModelParams):
+            return False
+        
+        # Core parameters that always matter
+        core_match = (
+            self.model == other.model and
+            self.pooling_strategy == other.pooling_strategy and
+            self.max_length == other.max_length and
+            self.task == other.task and
+            self.truncate_dim == self.truncate_dim and
+            self.encoding_format == other.encoding_format and
+            self.truncate == other.truncate
+        )
+        
+        # Only check input_type if it's not a model that handles input types via prefixing
+        if not self.model.startswith(('mixedbread_ai', 'cl_nagoya', 'jinaai')):  # Add other prefix-based models as needed
+            core_match = core_match and (self.input_type == other.input_type)
+            
+        return core_match
+
+    def __str__(self):
+        """String representation of parameters"""
+        return (f"ModelParams(model={self.model}, input_type={self.input_type}, "
+                f"pooling_strategy={self.pooling_strategy}, max_length={self.max_length}, "
+                f"task={self.task}, truncate_dim={self.truncate_dim}, "
+                f"encoding_format={self.encoding_format}, truncate={self.truncate})")
 
 class EmbeddingOutput(BaseModel):
     embeddings: List[List[float]]
@@ -30,25 +64,38 @@ class ModelService:
     def __init__(self):
         self.current_handler = None
         self.model_initialized = False
-        self.model_name = None
-        self.input_type = None
-        self.pooling_strategy = None
-        self.max_length = None
-        self.task = None
-        self.truncate_dim = None
+        self.current_params = None
         self.metrics = {}  # Store metrics per model
+
+    def _params_match(self, new_params: ModelParams) -> bool:
+        """Check if current model parameters match the requested parameters."""
+        matches = (
+            self.model_initialized and
+            self.current_params == new_params
+        )
+        if not matches:
+            DramaticLogger["Dramatic"]["debug"](
+                f"[ModelService] Parameters differ:\n"
+                f"Current: {str(self.current_params)}\n"
+                f"New: {str(new_params)}"
+            )
+        return matches
 
     def initialize_model(self, request):
         """
         Dynamically load a model handler based on request.model.
         """
         params = ModelParams(request)
-        self.model_name = params.model
-        self.input_type = params.input_type
-        self.pooling_strategy = params.pooling_strategy
-        self.max_length = params.max_length
-        self.task = params.task
-        self.truncate_dim = params.truncate_dim
+        
+        # Skip initialization if parameters match
+        if self._params_match(params):
+            DramaticLogger["Normal"]["info"](
+                f"[ModelService] Model '{params.model}' already initialized with identical parameters. Skipping reinitialization."
+            )
+            return
+
+        # Store new params
+        self.current_params = params
 
         # Transform model name for handler lookup (e.g., "jinaai_jina-embeddings-v3" => "jinaai_jina_embeddings_v3")
         sanitized_name = params.model.lower().replace('-', '_').replace('.', '_')
@@ -91,28 +138,33 @@ class ModelService:
         try:
             # For SentenceTransformer models, pass texts directly
             if hasattr(self.current_handler.model, 'encode'):
+                DramaticLogger["Dramatic"]["debug"](f"[ModelService] Using SentenceTransformer to encode ", texts)
                 embeddings = self.current_handler.generate_embeddings(
                     texts,  # Pass texts directly
-                    pooling_strategy=self.pooling_strategy,
-                    task=self.task,
-                    truncate_dim=self.truncate_dim
+                    pooling_strategy=self.current_params.pooling_strategy,
+                    task=self.current_params.task,
+                    truncate_dim=self.current_params.truncate_dim
                 )
             else:
                 # For standard transformer models, use prepare_input
-                inputs = self.current_handler.prepare_input(texts, self.input_type)
+                inputs = self.current_handler.prepare_input(texts, self.current_params.input_type)
+                # DramaticLogger["Dramatic"]["debug"](f"[ModelService] Using prepare_input to encode ", inputs)
                 embeddings = self.current_handler.generate_embeddings(
                     inputs,
-                    pooling_strategy=self.pooling_strategy,
-                    task=self.task,
-                    truncate_dim=self.truncate_dim
+                    pooling_strategy=self.current_params.pooling_strategy,
+                    task=self.current_params.task,
+                    truncate_dim=self.current_params.truncate_dim
                 )
 
+            # Get dimensions from the first embedding
+            dimensions = len(embeddings[0])
+
             # Update metrics
-            self._update_metrics(len(texts), embeddings.shape[1])
+            self._update_metrics(len(texts), dimensions)
 
             return EmbeddingOutput(
-                embeddings=embeddings.tolist(),
-                dimensions=embeddings.shape[1]
+                embeddings=embeddings,
+                dimensions=dimensions
             )
 
         except Exception as e:
@@ -126,13 +178,13 @@ class ModelService:
         return {
             "status": "running",
             "model_initialized": self.model_initialized,
-            "model_name": self.model_name if self.model_initialized else "none",
+            "model_name": self.current_params.model if self.model_initialized else "none",
             "current_config": {
-                "input_type": self.input_type,
-                "pooling_strategy": self.pooling_strategy,
-                "max_length": self.max_length,
-                "task": self.task,
-                "truncate_dim": self.truncate_dim
+                "input_type": self.current_params.input_type,
+                "pooling_strategy": self.current_params.pooling_strategy,
+                "max_length": self.current_params.max_length,
+                "task": self.current_params.task,
+                "truncate_dim": self.current_params.truncate_dim
             } if self.model_initialized else None
         }
 
@@ -160,7 +212,7 @@ class ModelService:
         """
         Get detailed information about a specific model.
         """
-        if self.current_handler and self.model_name == model_name:
+        if self.current_handler and self.current_params.model == model_name:
             return self.current_handler.get_model_info()
         
         # Try to load model info without fully initializing
@@ -183,13 +235,13 @@ class ModelService:
         """
         Update metrics for the current model.
         """
-        if self.model_name not in self.metrics:
-            self.metrics[self.model_name] = {
+        if self.current_params.model not in self.metrics:
+            self.metrics[self.current_params.model] = {
                 "total_requests": 0,
                 "total_texts": 0,
                 "total_dimensions": embedding_dim,
             }
         
-        self.metrics[self.model_name]["total_requests"] += 1
-        self.metrics[self.model_name]["total_texts"] += num_texts
-        self.metrics[self.model_name]["total_dimensions"] += embedding_dim 
+        self.metrics[self.current_params.model]["total_requests"] += 1
+        self.metrics[self.current_params.model]["total_texts"] += num_texts
+        self.metrics[self.current_params.model]["total_dimensions"] += embedding_dim 

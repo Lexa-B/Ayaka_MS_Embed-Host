@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, Union
 from dramatic_logger import DramaticLogger
 from model_service import ModelService
+import json
 
 app = FastAPI(
     title="Ayaka Embeddings API",
@@ -28,7 +29,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             body = await request.body()
             try:
                 body_str = body.decode('utf-8')
-                DramaticLogger["Dramatic"]["debug"]("[Embedding-Host] Request Body:", body_str)
+                DramaticLogger["Dramatic"]["debug"]("[Embedding-Host] Request Body:", json.loads(body_str))
             except UnicodeDecodeError:
                 DramaticLogger["Dramatic"]["warning"]("[Embedding-Host] Could not decode request body.")
             
@@ -104,33 +105,28 @@ async def create_embeddings(request: EmbeddingRequest):
     """Generate embeddings for the provided input text."""
     try:
         # Initialize model if needed
-        if (not model_service.model_initialized or 
-            model_service.model_name != request.model or
-            model_service.input_type != request.input_type or
-            model_service.pooling_strategy != request.pooling_strategy or
-            model_service.task != request.task or
-            model_service.truncate_dim != request.truncate_dim):
-            
-            model_service.initialize_model(request)
+        model_service.initialize_model(request)
 
         # Generate embeddings
         output = model_service.generate_embeddings(request.input)
         
-        # Format response
-        return EmbeddingResponse(
-            data=[
-                EmbeddingData(
-                    index=i,
-                    embedding=embedding
-                )
+        # Format response to exactly match OpenAI API spec
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "embedding": embedding,
+                    "index": i
+                }
                 for i, embedding in enumerate(output.embeddings)
             ],
-            model=request.model,
-            usage={
-                "prompt_tokens": 0,  # ToDo: Add token counting
+            "model": request.model,
+            "usage": {
+                "prompt_tokens": 0,
                 "total_tokens": 0
             }
-        )
+        }
         
     except ValueError as ve:
         if "Model files not found" in str(ve):

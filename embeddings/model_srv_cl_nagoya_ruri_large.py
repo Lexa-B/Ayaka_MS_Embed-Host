@@ -69,6 +69,10 @@ class ModelHandler(BaseModelHandler):
             if truncate_dim is not None:
                 embeddings = embeddings[:, :truncate_dim]
 
+            # Convert to list of lists for API compatibility
+            if isinstance(embeddings, torch.Tensor):
+                embeddings = embeddings.cpu().tolist()
+
             return embeddings
 
         except Exception as e:
